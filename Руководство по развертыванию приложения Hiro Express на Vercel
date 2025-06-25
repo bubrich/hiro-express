@@ -1,0 +1,220 @@
+Руководство по развертыванию приложения Hiro Express на Vercel
+Это руководство описывает полный процесс развертывания трехкомпонентного приложения (бэкенд, фронтенд, админ-панель) на платформе Vercel с использованием подхода Monorepo.
+
+Обзор архитектуры
+Приложение состоит из трех частей:
+
+Бэкенд (api): Node.js/Express приложение, которое предоставляет API для работы с меню, заказами и пользователями. Использует PostgreSQL в качестве базы данных.
+Фронтенд (frontend): Статический сайт (HTML, CSS, JS), представляющий собой Telegram Mini App для клиентов.
+Админ-панель (admin): Статический сайт (HTML, CSS, JS) для управления контентом (меню, категории, заказы).
+Мы развернем все три компонента как единый проект на Vercel, что позволит им работать под одним доменом и упростит взаимодействие между ними.
+
+Шаг 1: Подготовка структуры проекта
+Для корректной работы на Vercel необходимо организовать код в структуру Monorepo.
+
+Создайте корневую папку для вашего проекта (например, hiro-express-vercel).
+Внутри создайте три папки: api, frontend, admin.
+Переместите файлы:
+В папку api: все файлы бэкенда (контроллеры, модели, роуты, package.json, server.js и т.д.).
+В папку frontend: файлы клиентского приложения (index.html, script.js, style.css).
+В папку admin: все файлы панели управления (index.html, app.js, views/, auth_service.js и т.д.).
+Итоговая структура должна выглядеть так:
+
+hiro-express-vercel/
+├── api/
+│   ├── controllers/
+│   ├── models/
+│   ├── routes/
+│   ├── services/
+│   ├── package.json
+│   └── server.js
+├── frontend/
+│   ├── index.html
+│   ├── script.js
+│   └── style.css
+├── admin/
+│   ├── views/
+│   ├── api_service.js
+│   ├── app.js
+│   ├── index.html
+│   └── style.css
+└── vercel.json  (этот файл мы создадим позже)
+Шаг 2: Адаптация кода
+Некоторые части кода требуют небольших изменений для работы в облачной среде.
+
+2.1. Фронтенд (Telegram Mini App)
+Фронтенд загружает данные из локальных .json файлов. Необходимо изменить это поведение, чтобы данные запрашивались с бэкенда.
+
+В файле frontend/script.js найдите функцию initializeApp и измените строки с fetchData:
+
+Было:
+
+    const initializeApp = async () => {
+        checkExistingSession();
+        initTelegram();
+
+        [categories, menuItems] = await Promise.all([
+            fetchData(`${API_BASE_URL}/categories`), // This was likely wrong in original code
+            fetchData(`${API_BASE_URL}/menu`)
+        ]);
+        
+        renderCategories();
+        renderMenuItems();
+    };
+Стало:
+
+    const initializeApp = async () => {
+        checkExistingSession();
+        initTelegram();
+
+        // Запрашиваем данные с нашего реального бэкенда
+        [categories, menuItems] = await Promise.all([
+            fetchData(`${API_BASE_URL}/menu/categories`),
+            fetchData(`${API_BASE_URL}/menu`)
+        ]);
+        
+        renderCategories();
+        renderMenuItems();
+    };
+Эта правка направит запросы на эндпоинты /api/menu/categories и /api/menu, которые будут обслуживаться нашим бэкендом.
+
+2.2. Админ-панель
+Админ-панель использует моковые данные. Заменим их на реальные вызовы API.
+
+Замените содержимое файла admin/api_service.js на следующий код:
+
+// admin/api_service.js
+
+const API_BASE_URL = '/api'; // Относительный путь к нашему API
+
+// Вспомогательная функция для выполнения запросов
+const request = async (url, method = 'GET', body = null) => {
+    const options = {
+        method,
+        headers: {
+            'Content-Type': 'application/json',
+            // Здесь можно будет добавить токен авторизации в будущем
+            // 'Authorization': `Bearer ${localStorage.getItem('adminAuthToken')}`
+        }
+    };
+    if (body) {
+        options.body = JSON.stringify(body);
+    }
+
+    const response = await fetch(`${API_BASE_URL}${url}`, options);
+    
+    if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || `Ошибка ${response.status}`);
+    }
+    // Для DELETE запросов может не быть тела ответа
+    if (response.status === 204 || response.headers.get('content-length') === '0') {
+        return { success: true };
+    }
+    return response.json();
+};
+
+export const api = {
+    // Menu Items
+    getMenuItems: () => request('/menu'),
+    createMenuItem: (itemData) => request('/menu', 'POST', itemData), // Предполагаем, что эндпоинт будет создан
+    updateMenuItem: (id, itemData) => request(`/menu/${id}`, 'PUT', itemData), // Предполагаем, что эндпоинт будет создан
+    deleteMenuItem: (id) => request(`/menu/${id}`, 'DELETE'), // Предполагаем, что эндпоинт будет создан
+
+    // Categories
+    getCategories: () => request('/menu/categories'),
+    createCategory: (catData) => request('/menu/categories', 'POST', catData), // Предполагаем, что эндпоинт будет создан
+    updateCategory: (id, catData) => request(`/menu/categories/${id}`, 'PUT', catData), // Предполагаем, что эндпоинт будет создан
+    deleteCategory: (id) => request(`/menu/categories/${id}`, 'DELETE'), // Предполагаем, что эндпоинт будет создан
+
+    // Orders
+    getOrders: () => request('/orders'),
+};
+⚠️ Важно: Текущий бэкенд не реализует все эндпоинты для CRUD-операций (создание, обновление, удаление) в админ-панели. Также в нем отсутствует авторизация для администратора. Для полноценной работы админки потребуется доработка бэкенда. Данное руководство фокусируется на развертывании существующего кода.
+
+Шаг 3: Конфигурация развертывания (vercel.json)
+Создайте файл vercel.json в корневой папке вашего проекта и добавьте в него следующую конфигурацию:
+
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/server.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "frontend/**/*.html",
+      "use": "@vercel/static"
+    },
+    {
+      "src": "admin/**/*.html",
+      "use": "@vercel/static"
+    }
+  ],
+  "rewrites": [
+    // 1. API: все запросы на /api/* направляются на бэкенд
+    { "source": "/api/(.*)", "destination": "/api/server.js" },
+    
+    // 2. Админ-панель: сначала проверяем статические файлы, потом SPA
+    { "source": "/admin/(.+\\..+)", "destination": "/admin/$1" },
+    { "source": "/admin", "destination": "/admin/index.html" },
+    { "source": "/admin/(.*)", "destination": "/admin/index.html" },
+    
+    // 3. Фронтенд: сначала проверяем статические файлы, потом SPA
+    { "source": "/(.+\\..+)", "destination": "/frontend/$1" },
+    { "source": "/(.*)", "destination": "/frontend/index.html" }
+  ]
+}
+Объяснение конфигурации
+builds: Этот блок сообщает Vercel, как собирать каждую часть нашего проекта.
+api/server.js собирается как серверная функция Node.js (@vercel/node).
+frontend и admin собираются как статические сайты (@vercel/static).
+rewrites: Этот блок управляет маршрутизацией запросов. Правила читаются сверху вниз.
+Любой запрос, начинающийся с /api/, перенаправляется на бэкенд.
+Запросы к админ-панели (/admin/...) обрабатываются так: если запрашивается файл (например, /admin/style.css), он отдается как есть. Если запрашивается путь без расширения (например, /admin/orders), отдается index.html, чтобы JavaScript-роутер админки мог обработать его.
+Все остальные запросы обрабатываются фронтендом по тому же принципу, что и админ-панель.
+Шаг 4: Настройка проекта в Vercel и подключение БД
+Создайте Git-репозиторий: Загрузите ваш проект (со структурой из Шага 1) на GitHub, GitLab или Bitbucket.
+Создайте проект Vercel:
+Войдите в свой аккаунт Vercel.
+Нажмите "Add New..." -> "Project".
+Импортируйте ваш Git-репозиторий.
+Vercel должен автоматически определить, что это Monorepo. Никаких настроек Framework Preset или Root Directory менять не нужно, так как vercel.json все сделает сам.
+Подключите базу данных Vercel Postgres:
+Перейдите на вкладку "Storage" вашего нового проекта.
+Нажмите "Connect Store" -> "Postgres" -> "Create New".
+Выберите регион и создайте базу данных. Привяжите ее к вашему проекту.
+Vercel автоматически создаст переменную окружения POSTGRES_URL и безопасно передаст ее в ваше приложение. Конфигурация config/database.js уже готова к работе с таким URL и SSL-соединением.
+Шаг 5: Настройка переменных окружения
+Для работы приложения необходимы секретные ключи. Их нужно добавить в настройках проекта на Vercel.
+
+Перейдите в "Settings" -> "Environment Variables" вашего проекта и добавьте следующие переменные:
+
+Переменная	Значение	Описание
+NODE_ENV	production	Устанавливает режим работы Node.js.
+DATABASE_URL	${process.env.POSTGRES_URL}	Важно: Это специальный синтаксис. Vercel подставит сюда значение из Vercel Postgres.
+TELEGRAM_BOT_TOKEN	123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11 (ваш токен)	Токен вашего Telegram бота, полученный от @BotFather.
+TELEGRAM_ADMIN_CHAT_ID	123456789 (ID вашего чата)	ID чата или канала, куда будут приходить уведомления о новых заказах.
+JWT_SECRET	generate_a_very_long_and_secure_random_string	Секретный ключ для подписи JWT. Сгенерируйте надежную случайную строку.
+JWT_EXPIRES_IN	90d	Срок жизни JWT токена (например, 90 дней).
+Шаг 6: Развертывание и проверка
+Запустите развертывание: После сохранения всех переменных окружения, перейдите на вкладку "Deployments" и запустите новое развертывание (Redeploy) для последней версии вашего кода. Либо просто сделайте новый коммит в основную ветку вашего репозитория.
+Отслеживайте процесс: Vercel начнет сборку и развертывание всех трех частей приложения. Вы можете следить за логами в реальном времени.
+Получите URL: После успешного развертывания Vercel предоставит вам основной домен (например, hiro-express.vercel.app).
+Проверка работы:
+Фронтенд (TMA): Откройте https://<ваш-домен>.vercel.app. Вы должны увидеть главный экран приложения.
+Бэкенд (API): Откройте https://<ваш-домен>.vercel.app/api. Вы должны увидеть сообщение "Welcome to Hiro Express API...".
+Админ-панель: Откройте https://<ваш-домен>.vercel.app/admin. Вы должны увидеть страницу входа в панель управления.
+Шаг 7: Финальные настройки
+Инициализация базы данных:
+
+Команда db.sequelize.sync() в server.js попытается создать таблицы при первом запуске API. Это должно сработать для инициализации.
+В будущем рекомендуется перейти на систему миграций (sequelize-cli) для более контролируемого управления схемой БД.
+Настройка Telegram бота:
+
+Откройте диалог с @BotFather.
+Используйте команду /setmenubutton.
+Выберите своего бота.
+Отправьте URL вашего развернутого фронтенда: https://<ваш-домен>.vercel.app
+Задайте текст для кнопки, например, "Открыть меню".
+Теперь ваше приложение полностью развернуто и готово к работе
